@@ -114,7 +114,7 @@ GREEN_ROT = _mul_quat(GREEN_ROT, _AXIS_FIX_Y_UP_TO_Z_UP)
 #   * Solid board: one static box collider (ChessBoardBase) resting on the table top (0.794 m), 7.5 mm thick; the 64
 #     coloured squares are thin visual tiles on its top. Pieces (origin at their base) stand on the board top + 1 mm.
 TABLE_TOP_Z = 0.794                                   # PackingTable top (asset 0.9941 m high, spawned at z -0.2)
-SQUARE_SIZE = float(os.environ.get("G1_SQUARE_SIZE", "0.035"))  # 3.5 cm default (was 5.7cm); whole board = 8x this
+SQUARE_SIZE = float(os.environ.get("G1_SQUARE_SIZE", "0.025"))  # 2.5 cm default (user, 2026-11-22: all 64 squares reachable with margin; was 3.5, 5.7)
 # piece size follows the square size (king base 4.4 cm x scale: 2.7 cm at 0.6, 2.4 at 0.55, 2.2 at 0.5)
 _PIECE_SCALE_DEFAULT = {0.035: 0.6, 0.030: 0.55, 0.025: 0.5}.get(round(SQUARE_SIZE, 3), 0.6 * SQUARE_SIZE / 0.035)
 PIECE_SCALE = float(os.environ.get("G1_PIECE_SCALE", str(_PIECE_SCALE_DEFAULT)))
