@@ -115,7 +115,9 @@ GREEN_ROT = _mul_quat(GREEN_ROT, _AXIS_FIX_Y_UP_TO_Z_UP)
 #     coloured squares are thin visual tiles on its top. Pieces (origin at their base) stand on the board top + 1 mm.
 TABLE_TOP_Z = 0.794                                   # PackingTable top (asset 0.9941 m high, spawned at z -0.2)
 SQUARE_SIZE = float(os.environ.get("G1_SQUARE_SIZE", "0.035"))  # 3.5 cm default (was 5.7cm); whole board = 8x this
-PIECE_SCALE = float(os.environ.get("G1_PIECE_SCALE", "0.6"))  # shrink pieces to match the smaller board
+# piece size follows the square size (king base 4.4 cm x scale: 2.7 cm at 0.6, 2.4 at 0.55, 2.2 at 0.5)
+_PIECE_SCALE_DEFAULT = {0.035: 0.6, 0.030: 0.55, 0.025: 0.5}.get(round(SQUARE_SIZE, 3), 0.6 * SQUARE_SIZE / 0.035)
+PIECE_SCALE = float(os.environ.get("G1_PIECE_SCALE", str(_PIECE_SCALE_DEFAULT)))
 _BOARD_X_DEFAULT = {0.035: 0.38, 0.030: 0.36, 0.025: 0.35}.get(round(SQUARE_SIZE, 3), max(0.38, 0.24 + 4 * SQUARE_SIZE))
 BOARD_X_PELVIS = float(os.environ.get("G1_BOARD_X", str(_BOARD_X_DEFAULT)))   # m in front of the pelvis
 BOARD_Y_PELVIS = float(os.environ.get("G1_BOARD_Y", "0.0"))                   # m to the robot's left
