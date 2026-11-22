@@ -71,7 +71,7 @@ Live sim:
    ```bash
    cd ~/VLA/unitree_sim_isaaclab && G1_REAL_HEAD_DEPTH=1 G1_REAL_HEAD_DEPTH_STRIDE=2 python sim_main.py --device cpu \
      --enable_cameras --task Isaac-Chess-Pieces-G129-Dex1-Joint-Factory --enable_dex1_dds --robot_type g129
-   # chess board: 2.5 cm squares by default (all 64 reachable with margin, chessreach/chess_reach_25mm.png)
+   # chess board: 2.5 cm squares, centre 0.37 m ahead (64/64 reachable, 61 with +-4 cm margin; chessreach/chess_reach_25mm.png)
    ```
 2. Terminal 2, after the sim shows the robot:
    ```bash

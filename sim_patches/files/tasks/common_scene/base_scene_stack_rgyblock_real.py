@@ -118,7 +118,8 @@ SQUARE_SIZE = float(os.environ.get("G1_SQUARE_SIZE", "0.025"))  # 2.5 cm default
 # piece size follows the square size (king base 4.4 cm x scale: 2.7 cm at 0.6, 2.4 at 0.55, 2.2 at 0.5)
 _PIECE_SCALE_DEFAULT = {0.035: 0.6, 0.030: 0.55, 0.025: 0.5}.get(round(SQUARE_SIZE, 3), 0.6 * SQUARE_SIZE / 0.035)
 PIECE_SCALE = float(os.environ.get("G1_PIECE_SCALE", str(_PIECE_SCALE_DEFAULT)))
-_BOARD_X_DEFAULT = {0.035: 0.38, 0.030: 0.36, 0.025: 0.35}.get(round(SQUARE_SIZE, 3), max(0.38, 0.24 + 4 * SQUARE_SIZE))
+# 2.5 cm: 0.37 = 0.35 + 2 cm further from the robot (user, 2026-11-22; d8/e8/f8 then reachable but < 4 cm margin)
+_BOARD_X_DEFAULT = {0.035: 0.38, 0.030: 0.36, 0.025: 0.37}.get(round(SQUARE_SIZE, 3), max(0.38, 0.24 + 4 * SQUARE_SIZE))
 BOARD_X_PELVIS = float(os.environ.get("G1_BOARD_X", str(_BOARD_X_DEFAULT)))   # m in front of the pelvis
 BOARD_Y_PELVIS = float(os.environ.get("G1_BOARD_Y", "0.0"))                   # m to the robot's left
 ROBOT_XY = (-4.2, -3.7)                               # robot root, facing -y (robot left = world +x)
