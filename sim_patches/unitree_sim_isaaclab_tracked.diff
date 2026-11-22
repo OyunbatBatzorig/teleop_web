@@ -1,0 +1,214 @@
+diff --git a/action_provider/action_provider_dds.py b/action_provider/action_provider_dds.py
+index 7a3282e..3628325 100644
+--- a/action_provider/action_provider_dds.py
++++ b/action_provider/action_provider_dds.py
+@@ -223,8 +223,14 @@ class DDSActionProvider(ActionProvider):
+                     gripper_positions = right_gripper_positions + left_gripper_positions
+                     if len(gripper_positions) >= 2:
+                         self._gripper_buf.copy_(torch.tensor(gripper_positions[:2], dtype=torch.float32, device=self.env.device))
+-                        gp_vals = self._gripper_buf.index_select(0, self._gripper_source_idx_t)
+-                        full_action.index_copy_(0, self._gripper_target_idx_t, gp_vals)
++                        self._gripper_have = True
++                # 2026-11-22: keep the last gripper target when this step has no complete command (shared memory read
++                # failed / one side missing). Before, full_action was zeroed and the jaws were driven to joint 0
++                # (~45 mm open) for those steps, so a closing gripper stalled half-way in mid-air.
++                if getattr(self, "_gripper_have", False):
++                    gp_vals = self._gripper_buf.index_select(0, self._gripper_source_idx_t)
++                    full_action.index_copy_(0, self._gripper_target_idx_t, gp_vals)
++                self._dex1_log(gripper_cmd)
+              
+             elif self.dex3_dds:
+                 hand_cmds = self.dex3_dds.get_hand_commands()
+@@ -257,6 +263,45 @@ class DDSActionProvider(ActionProvider):
+             print(f"[{self.name}] Get DDS action failed: {e}")
+             return None
+     
++    def _dex1_log(self, gripper_cmd):
++        """2026-11-22f: Dex1 command path log at 10 Hz -> ~/VLA/teleop_web/logs/sim_dex1_<date_time>.log (G1_DEX1_LOG=0: off).
++        Per side: received command (DDS q units, 0 closed .. 5.6 open), applied target and measured finger joints (same units),
++        plus how many steps since the last line had no complete command (shared memory read empty / one side missing)."""
++        import os, time
++        if os.environ.get("G1_DEX1_LOG", "1") == "0":
++            return
++        try:
++            ok = bool(gripper_cmd) and len(gripper_cmd.get("left_gripper_cmd", {}).get("positions", [])) >= 1 \
++                and len(gripper_cmd.get("right_gripper_cmd", {}).get("positions", [])) >= 1
++            self._dex1_miss = getattr(self, "_dex1_miss", 0) + (0 if ok else 1)
++            self._dex1_steps = getattr(self, "_dex1_steps", 0) + 1
++            now = time.time()
++            if now - getattr(self, "_dex1_t", 0.0) < 0.1:
++                return
++            self._dex1_t = now
++            if not hasattr(self, "_dex1_f"):
++                d = os.path.expanduser("~/VLA/teleop_web/logs")
++                os.makedirs(d, exist_ok=True)
++                self._dex1_f = open(os.path.join(d, time.strftime("sim_dex1_%Y%m%d_%H%M%S.log")), "a", buffering=1)
++                self._dex1_f.write("# time | per side: cmd (received) tgt (applied) q1 q2 (finger joints), units 0 closed .. 5.6 open | "
++                                   "miss = steps without a complete command / steps since last line\n")
++            u = lambda m: (0.03 - float(m)) / 0.05 * 5.6          # joint metres -> DDS units (inverse of _convert_to_joint_range)
++            # finger joints in gripper_joint_mapping order: left J1, left J2, right J1, right J2
++            jp = self.env.scene["robot"].data.joint_pos[0, self._gripper_target_idx_t].tolist()
++            tgt = self._gripper_buf.tolist() if getattr(self, "_gripper_have", False) else [float("nan")] * 2   # [right, left]
++            rc = (gripper_cmd or {}).get("right_gripper_cmd", {}).get("positions", [None])
++            lc = (gripper_cmd or {}).get("left_gripper_cmd", {}).get("positions", [None])
++            f = lambda v: "  -  " if v is None else f"{u(v):5.2f}"
++            self._dex1_f.write(f"{time.strftime('%H:%M:%S')}.{int(now * 10) % 10} | L cmd {f(lc[0] if lc else None)} tgt {u(tgt[1]):5.2f}"
++                               f" q {u(jp[0]):5.2f} {u(jp[1]):5.2f} | R cmd {f(rc[0] if rc else None)} tgt {u(tgt[0]):5.2f}"
++                               f" q {u(jp[2]):5.2f} {u(jp[3]):5.2f} | miss {self._dex1_miss}/{self._dex1_steps}\n")
++            self._dex1_miss = self._dex1_steps = 0
++        except Exception as e:                                   # logging must never stop the sim
++            if not getattr(self, "_dex1_err", False):
++                print(f"[{self.name}] dex1 log disabled: {e}")
++                self._dex1_err = True
++            os.environ["G1_DEX1_LOG"] = "0"
++
+     def _convert_to_joint_range(self, value):
+         """Convert gripper control value to joint angle"""
+         input_min, input_max = 0.0, 5.6
+diff --git a/dds/dds_master.py b/dds/dds_master.py
+index 2e500dd..23a2fba 100644
+--- a/dds/dds_master.py
++++ b/dds/dds_master.py
+@@ -3,6 +3,7 @@
+ import time
+ import threading
+ from typing import Dict, List, Optional
++import os
+ from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+ from dds.dds_base import DDSObject
+ 
+@@ -57,7 +58,9 @@ class DDSManager:
+             return True
+         
+         try:
+-            ChannelFactoryInitialize(1)
++            # G1_DDS_IFACE=lo: keep the sim's DDS on loopback so Wi-Fi switches don't cut it off from local
++            # teleop/tools (they must use the same interface, e.g. teleop --network-interface lo). 2026-10-27
++            ChannelFactoryInitialize(1, networkInterface=os.environ.get("G1_DDS_IFACE") or None)
+             self.dds_initialized = True
+             print("[DDSManager] DDS system initialized")
+             return True
+diff --git a/tasks/common_config/camera_configs.py b/tasks/common_config/camera_configs.py
+index 96bf1b9..8f01312 100644
+--- a/tasks/common_config/camera_configs.py
++++ b/tasks/common_config/camera_configs.py
+@@ -84,9 +84,15 @@ class CameraPresets:
+     """
+     
+     @classmethod
+-    def g1_front_camera(cls) -> CameraCfg:
++    def g1_front_camera(cls, data_types: list = None) -> CameraCfg:
+         """front camera configuration"""
+-        return CameraBaseCfg.get_camera_config()
++        # 2026-11-21: intrinsics of the real head RealSense D435i (g1_camera_twin capture 2026-11-21, factory calibration,
++        #   640x480: fx 604.20, fy 603.95, cx 322.06, cy 248.55, HFOV 55.8 deg). focal_length = 604.2 / 640 * 20 = 18.88
++        #   with horizontal_aperture 20 (vertical follows the 4:3 image, fy ~604). Pinhole with a centred principal point:
++        #   the 2 px / 8.5 px offset of cx / cy is not modelled. Was focal_length 7.6 (fx 243 px, HFOV 105.5 deg).
++        #   Pose unchanged: d435_link (URDF d435_joint) with the ROS optical rotation. Backup: .bak_20261121f
++        #   data_types: e.g. ["rgb", "distance_to_image_plane"] for the operator's point cloud (Real task, 2026-11-22).
++        return CameraBaseCfg.get_camera_config(focal_length=18.88, data_types=data_types)
+     @classmethod
+     def h12_front_camera(cls) -> CameraCfg:
+         """front camera configuration"""
+@@ -116,12 +122,30 @@ class CameraPresets:
+             width=640,
+             update_period=0.02,
+             data_types=["rgb"],
+-            focal_length=12,
++            focal_length=13.65,   # D405 fx ~436 px at 640 wide (was 12)
+             focus_distance=400.0,
+             horizontal_aperture=20.0,
+-            clipping_range=(0.1, 1.0e5),
+-            pos_offset=(0.02541028, 0.045, 0.135),
+-            rot_offset=(-0.34202, 0.93969, 0, 0),
++            clipping_range=(0.01, 1.0e5),   # 2026-11-22: was 0.1 m, which cut away the fingers (6-10 cm) - only the tips showed
++            # 2026-11-21: moved to the REAL robot's wrist camera (user photos with ruler + protractor, and the real
++            #   wrist frames of the Unitree G1_Stack_Block dataset). The real camera is a silver stereo box
++            #   (~42 x 42 x 23 mm, two lenses, USB-C; probably an Intel RealSense D405 - a guess from the looks only,
++            #   colour from the left imager) on a white 3D-printed bracket clamped around the Dex1 motor body.
++            #   v2 estimate (Quest passthrough photos of the real part next to the ghost + ruler / protractor photos +
++            #   the real wrist frames): lens midpoint above the motor body, Dex1 base (0.035, 0, 0.078) =
++            #   hand_base (0, 0.035, 0.078), view 33 deg down (237 deg about x).
++            #   Uncertainty: x +-10 mm, y +-10 mm, z +-7 mm, tilt +-6 deg.
++            #   TODO (later): D405 colour FOV is ~87 x 58 deg; FOV below is still the sim's 80 x 64 deg (unchanged).
++            # History: original pos_offset=(0.02541028, 0.045, 0.135), rot_offset=(-0.34202, 0.93969, 0, 0)
++            #   (13.5 cm above the wrist axis, 50 deg down); then the USD's single-lens module
++            #   (0, 0.054, 0.062) / (-0.46179, 0.88699, 0, 0), which is not the camera on the real robot; then v1
++            #   real-camera estimate (0, 0.06, 0.081) / (-0.42262, 0.90631, 0, 0) (camera too far forward).
++            #   Backups: camera_configs.py.bak_20261121 (original), .bak_20261121b, .bak_20261121c, .bak_20261121d
++            # 2026-11-21 FIT (g1_camera_twin capture 2026-11-21, real D405 images: floor plane + finger silhouette,
++            #   Dex1 opening corrected; residuals left floor 0.8 deg / height 6 mm / finger IoU 0.74, right 0.6 deg / 5 mm /
++            #   0.79; estimated +-5 mm, +-2 deg). Right camera is rolled 180 deg (USB-C cable exits outward). Backup .bak_20261121e
++            #   D405 640x480: fx ~436 px -> focal_length 13.65 with horizontal_aperture 20 (HFOV ~72.5 deg).
++            pos_offset=(-0.0107, 0.059, 0.0627),
++            rot_offset=(-0.49525, 0.86829, -0.00167, 0.02814),
+         )
+     @classmethod
+     def right_gripper_wrist_camera(cls) -> CameraCfg:
+@@ -132,12 +156,18 @@ class CameraPresets:
+             width=640,
+             update_period=0.02,
+             data_types=["rgb"],
+-            focal_length=12,
++            focal_length=13.65,   # D405 fx ~436 px at 640 wide (was 12)
+             focus_distance=400.0,
+             horizontal_aperture=20.0,
+-            clipping_range=(0.1, 1.0e5),
+-            pos_offset=(-0.02541028, 0.045, 0.135),
+-            rot_offset=(-0.34202, 0.93969, 0, 0),
++            clipping_range=(0.01, 1.0e5),   # 2026-11-22: was 0.1 m, which cut away the fingers (6-10 cm) - only the tips showed
++            # 2026-11-21: REAL robot wrist camera estimate, same pose as the left camera (see the comment there).
++            # Original: pos_offset=(-0.02541028, 0.045, 0.135), rot_offset=(-0.34202, 0.93969, 0, 0)
++            # 2026-11-21 FIT (g1_camera_twin capture 2026-11-21, real D405 images: floor plane + finger silhouette,
++            #   Dex1 opening corrected; residuals left floor 0.8 deg / height 6 mm / finger IoU 0.74, right 0.6 deg / 5 mm /
++            #   0.79; estimated +-5 mm, +-2 deg). Right camera is rolled 180 deg (USB-C cable exits outward). Backup .bak_20261121e
++            #   D405 640x480: fx ~436 px -> focal_length 13.65 with horizontal_aperture 20 (HFOV ~72.5 deg).
++            pos_offset=(0.0019, 0.0512, 0.0611),
++            rot_offset=(-0.0162, -0.00436, -0.86403, -0.50317),
+         ) 
+     @classmethod
+     def left_dex3_wrist_camera(cls) -> CameraCfg:
+diff --git a/tasks/common_observations/camera_state.py b/tasks/common_observations/camera_state.py
+index 28be26a..8e500ee 100644
+--- a/tasks/common_observations/camera_state.py
++++ b/tasks/common_observations/camera_state.py
+@@ -16,6 +16,7 @@ import queue
+ # add the project root directory to the path, so that the shared memory tool can be imported
+ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+ from tools.shared_memory_utils import MultiImageWriter
++from tools import head_depth_pub
+ 
+ if TYPE_CHECKING:
+     from isaaclab.envs import ManagerBasedRLEnv
+@@ -117,6 +118,10 @@ def get_camera_image(
+             images["head"] = head_image.numpy()
+         else:
+             images["head"] = head_image.cpu().numpy()
++        # operator point cloud (G1_REAL_HEAD_DEPTH=1, Real task only; 2026-10-27): publish head depth + rgb over zmq
++        if head_depth_pub.ENABLED and "distance_to_image_plane" in env.scene["front_camera"].data.output:
++            head_depth_pub.publish(env.scene["front_camera"].data.output["distance_to_image_plane"][0].cpu().numpy(),
++                                   images["head"])
+     
+     # Left camera (left wrist camera)
+     if "left_wrist_camera" in camera_keys:
+diff --git a/tasks/g1_tasks/__init__.py b/tasks/g1_tasks/__init__.py
+index 73cb25c..44449b5 100644
+--- a/tasks/g1_tasks/__init__.py
++++ b/tasks/g1_tasks/__init__.py
+@@ -13,6 +13,7 @@ from . import pick_place_cylinder_g1_29dof_inspire
+ from . import pick_place_redblock_g1_29dof_dex1
+ from . import pick_place_redblock_g1_29dof_dex3
+ from . import stack_rgyblock_g1_29dof_dex1
++from . import stack_rgyblock_real_g1_29dof_dex1   # G1_Stack_Block look-alike scene (added; original stack task unchanged)
+ from . import stack_rgyblock_g1_29dof_dex3
+ from . import stack_rgyblock_g1_29dof_inspire
+ from . import pick_redblock_into_drawer_g1_29dof_dex1
+@@ -26,7 +27,7 @@ from . import move_cylinder_g1_29dof_inspire_wholebody
+ __all__ = [
+         "pick_place_cylinder_g1_29dof_dex3", "pick_place_cylinder_g1_29dof_dex1", 
+         "pick_place_redblock_g1_29dof_dex1", "pick_place_redblock_g1_29dof_dex3", 
+-        "stack_rgyblock_g1_29dof_dex1", "stack_rgyblock_g1_29dof_dex3", 
++        "stack_rgyblock_g1_29dof_dex1", "stack_rgyblock_real_g1_29dof_dex1", "stack_rgyblock_g1_29dof_dex3", 
+         "stack_rgyblock_g1_29dof_inspire",
+         "pick_redblock_into_drawer_g1_29dof_dex1","pick_redblock_into_drawer_g1_29dof_dex3",
+         "pick_place_redblock_g1_29dof_inspire",

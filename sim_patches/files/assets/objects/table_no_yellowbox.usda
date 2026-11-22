@@ -1,0 +1,113 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+    doc = """table_with_yellowbox.usd restyled to look like the G1_Stack_Block training scene:
+    - the yellow target outline (Cube, Cube_01..03) is switched off (the training scene has a black mat instead)
+    - the table top uses a light pine texture cut from the real head-camera image (episode 1, frame 0),
+      grain running along the table's length as in the recordings
+    - the frame and legs are black, as in the real lab
+    The original asset is untouched; everything here is an override."""
+    metersPerUnit = 0.01
+    upAxis = "Z"
+)
+
+def Xform "Root" (
+    prepend references = @./table_with_yellowbox.usd@</Root>
+)
+{
+    over "PackingTable_2"
+    {
+        over "Cube" (active = false) {}
+        over "Cube_01" (active = false) {}
+        over "Cube_02" (active = false) {}
+        over "Cube_03" (active = false) {}
+
+        over "PackingTable_2"
+        {
+            over "SM_CratePacking_Table_A1"
+            {
+                over "SM_HeavyDutyPackingTable_C02_01" (
+                    instanceable = false
+                )
+                {
+                    over "Geometry"
+                    {
+                        over "M_HeavyDutyPackingTable_C01_TableTop" (prepend apiSchemas = ["MaterialBindingAPI"])
+                        {
+                            rel material:binding = </Root/Looks/RealWood>
+                        }
+                        over "M_HeavyDutyPackingTable_C01_TableTopSide" (prepend apiSchemas = ["MaterialBindingAPI"])
+                        {
+                            rel material:binding = </Root/Looks/RealWood>
+                        }
+                        over "M_HeavyDutyPackingTable_C01_Body" (prepend apiSchemas = ["MaterialBindingAPI"])
+                        {
+                            rel material:binding = </Root/Looks/BlackMetal>
+                        }
+                        over "M_HeavyDutyPackingTable_C01_Bolts" (prepend apiSchemas = ["MaterialBindingAPI"])
+                        {
+                            rel material:binding = </Root/Looks/BlackMetal>
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "Looks"
+    {
+        def Material "RealWood"
+        {
+            token outputs:surface.connect = </Root/Looks/RealWood/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </Root/Looks/RealWood/WoodTexture.outputs:rgb>
+                float inputs:roughness = 0.55
+                float inputs:metallic = 0
+                token outputs:surface
+            }
+
+            def Shader "WoodTexture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/real_wood_g1_stack_block.png@
+                token inputs:sourceColorSpace = "sRGB"
+                token inputs:wrapS = "mirror"
+                token inputs:wrapT = "mirror"
+                float2 inputs:st.connect = </Root/Looks/RealWood/UVScale.outputs:result>
+                float3 outputs:rgb
+            }
+
+            def Shader "UVScale"
+            {
+                uniform token info:id = "UsdTransform2d"
+                float2 inputs:in.connect = </Root/Looks/RealWood/UVReader.outputs:result>
+                float2 inputs:scale = (2.2, 4.7)    # table UVs: ~2 m per unit -> one texture tile ~0.9 m x 0.45 m
+                float2 outputs:result
+            }
+
+            def Shader "UVReader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+
+        def Material "BlackMetal"
+        {
+            token outputs:surface.connect = </Root/Looks/BlackMetal/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.03, 0.03, 0.03)
+                float inputs:roughness = 0.5
+                float inputs:metallic = 0.3
+                token outputs:surface
+            }
+        }
+    }
+}

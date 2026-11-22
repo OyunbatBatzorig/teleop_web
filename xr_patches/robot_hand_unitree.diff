@@ -1,0 +1,17 @@
+diff --git a/teleop/robot_control/robot_hand_unitree.py b/teleop/robot_control/robot_hand_unitree.py
+index ab8d61f..5da9922 100644
+--- a/teleop/robot_control/robot_hand_unitree.py
++++ b/teleop/robot_control/robot_hand_unitree.py
+@@ -329,8 +329,10 @@ class Dex1_1_Gripper_Controller:
+         LEFT_MAPPED_MIN  = 0.0           # The minimum initial motor position when the gripper closes at startup.
+         RIGHT_MAPPED_MIN = 0.0           # The minimum initial motor position when the gripper closes at startup.
+         # The maximum initial motor position when the gripper closes before calibration (with the rail stroke calculated as 0.6 cm/rad * 9 rad = 5.4 cm).
+-        LEFT_MAPPED_MAX = LEFT_MAPPED_MIN + 5.40 
+-        RIGHT_MAPPED_MAX = RIGHT_MAPPED_MIN + 5.40
++        # sim: open at 4.5 like the real G1_Stack_Block recordings (open 4.5-4.7, action max 4.50); 2026-10-27
++        OPEN_RANGE = 4.50 if self.simulation_mode else 5.40
++        LEFT_MAPPED_MAX = LEFT_MAPPED_MIN + OPEN_RANGE
++        RIGHT_MAPPED_MAX = RIGHT_MAPPED_MIN + OPEN_RANGE
+         left_target_action  = (LEFT_MAPPED_MAX - LEFT_MAPPED_MIN) / 2.0
+         right_target_action = (RIGHT_MAPPED_MAX - RIGHT_MAPPED_MIN) / 2.0
+ 

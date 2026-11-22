@@ -1,0 +1,18 @@
+# backups, logs, local test output
+*.bak*
+logs/
+qa/
+compare/
+chessreach/*.npz
+__pycache__/
+*.pyc
+*.png
+!web/**/*.png
+!chessreach/*.png
+# TLS certificates / keys and secrets (never commit)
+*.pem
+*.key
+*.crt
+*.p12
+.env
+!sim_patches/**/*.png

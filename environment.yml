@@ -1,0 +1,17 @@
+# Conda env "tv" for the teleop server (minimal; the versions are the ones it runs with, 2026-11-22).
+# conda env create -f environment.yml
+# then install unitree_sdk2py and xr_teleoperate's teleimager as described in README.md
+name: tv
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pinocchio=3.1.0
+  - casadi=3.6.7
+  - numpy=1.26.4
+  - pip
+  - pip:
+      - aiohttp==3.10.5
+      - pyzmq==27.1.0
+      - opencv-python==4.11.0.86
+      - meshcat

@@ -1,0 +1,15 @@
+# Optional autostart on PC2 (systemd user service):
+#   mkdir -p ~/.config/systemd/user && cp d435-depth-pub.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now d435-depth-pub
+#   journalctl --user -u d435-depth-pub -f
+[Unit]
+Description=G1 head D435i depth publisher for the Quest teleop point cloud
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 -u %h/teleop_pc2/d435_depth_pub.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 Teleop</title>
+<style>
+  :root { --bg: #0f1115; --panel: #1a1e25; --text: #e8eaed; --muted: #9aa0a6; --accent: #4fc3f7; --ok: #66bb6a; --bad: #ef5350; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 16px/1.4 system-ui, sans-serif; }
+  #ui { position: fixed; left: 16px; top: 16px; right: 16px; max-width: 520px; background: var(--panel);
+        border-radius: 12px; padding: 16px 18px; box-shadow: 0 6px 24px #0008; z-index: 2; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  #status { color: var(--muted); margin: 0 0 12px; }
+  #status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  button { font: inherit; font-weight: 600; padding: 12px 20px; border-radius: 10px; border: 0; cursor: pointer;
+           background: var(--accent); color: #062230; }
+  button:disabled { background: #3a3f47; color: var(--muted); cursor: default; }
+  details { margin-top: 12px; color: var(--muted); font-size: 14px; }
+  details li { margin: 2px 0; }
+  canvas { display: block; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "/static/vendor/three/build/three.module.js",
+    "three/examples/jsm/": "/static/vendor/three/examples/jsm/",
+    "urdf-loader": "/static/vendor/urdf-loader/URDFLoader.js"
+} }
+</script>
+</head>
+<body>
+<div id="ui">
+  <h1>G1 Teleop · Episode</h1>
+  <p id="status">Connecting to the robot server…</p>
+  <div class="row">
+    <button id="btn-vr" disabled>Enter VR</button>
+    <button id="btn-ar" disabled>Enter AR (pass-through)</button>
+  </div>
+  <details>
+    <summary>Controller map</summary>
+    <ul>
+      <li>Right stick → : start / end episode · Right stick ← : back</li>
+      <li>Left stick ↑ / ↓ : next / previous episode</li>
+      <li>A / X held : arm follows the ghost gripper (clutch)</li>
+      <li>Trigger : close / open gripper · Grip held : show that wrist camera</li>
+      <li>Touch thumb rest + move : move the ghost gripper (yellow dot = fixed point); B / Y : reset it</li>
+      <li>Thumb rest touched: bring the controller to a bar (top Force 5-120 N, bottom Width 0-83 mm, lights up within 6 cm) + hold grip; move the hand right = more, left = less (20 cm = full range); let go of grip = value stays (a touch that used a slider does not move the ghost); the panel and the yellow dot disappear as soon as the thumb leaves the rest (or when grip is released if a slider is still held); ?gripper=rubber_hand shows the rubber hand instead (no sliders)</li>
+      <li>Both sticks pressed + move hands : move / turn / scale the whole scene (50-200 %); the robot's feet go onto the real floor and stay there (green ring = on the floor, HUD shows the height); also hold a grip for up / down (snaps to the floor within 3 cm); press both twice : reset</li>
+      <li>Left stick press (L3) alone : show / hide the point cloud (server --cloud-file or --cloud-live)</li>
+    </ul>
+  </details>
+</div>
+<script type="module" src="/static/app.js?v=2026-11-22e"></script>
+</body>
+</html>
