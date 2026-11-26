@@ -47,6 +47,17 @@ EE_I_GAIN, EE_I_MAX = 0.02, 0.04       # slow position correction of the IK targ
 EE_I_DEADBAND, EE_I_STILL = 0.003, 0.15  # only beyond 3 mm and while the arm is nearly still (|dq| < 0.15 rad/s):
                                          # v1 (0.15 / step, always on) wound up during moves and made the arm swing
                                        # removes the IK's ~1-2 cm softness and steady sag while an arm follows
+# Tool centre point (2026-11-25, user: "TCP at the gripper tip"). The page's ghost pose is xr_teleoperate's L_ee / R_ee
+# (wrist_yaw_link + 5 cm). The Dex1 fingertips are at wrist_yaw_link + 0.0415 (dex1_base, URDF
+# g1_29dof_mode_15_with_dex1_1) + 0.1433 (tip of Dex1_finger_link_1.STL) = 0.1848 m, i.e. L_ee + 0.1348 m along x.
+# The IK now matches the TIP of the real gripper to the tip of the ghost, so a small orientation error no longer moves
+# the fingertips by mm. TELEOP_TCP_M=0 restores the old wrist point.
+TCP_M = float(os.environ.get("TELEOP_TCP_M", "0.1348"))
+T_TCP = np.eye(4); T_TCP[0, 3] = TCP_M
+IK_W_REG = float(os.environ.get("TELEOP_IK_REG", "0.0001"))  # 2026-11-25: 0.005 pulled the fingertip 3.4 mm off ; xr_teleoperate 0.02
+# 2026-11-25: xr_teleoperate's IK URDF (g1_body29_hand14) puts wrist_yaw 0.046 m after wrist_pitch, the Dex1 robot
+# (g1_29dof_mode_15_with_dex1_1: Isaac sim + the digital robot in the headset) 0.051 m -> a 5 mm ghost / gripper gap.
+WRIST_YAW_X = float(os.environ.get("TELEOP_WRIST_YAW_X", "0.051"))
 SIDES = ("left", "right")
 SL = {"left": slice(0, 7), "right": slice(7, 14)}
 GRIP_FULL_RAD, GRIP_FULL_MM = 5.4, 90.0
@@ -112,9 +123,59 @@ def make_ik():
     os.chdir(os.path.join(XR_TELEOP, "teleop"))      # G1_29_ArmIK uses relative URDF / cache paths
     try:
         from teleop.robot_control.robot_arm_ik import G1_29_ArmIK
-        return G1_29_ArmIK()
+        ik = G1_29_ArmIK()
     finally:
         os.chdir(cwd)
+    ik.ee_frames = ("L_ee", "R_ee")
+    if TCP_M > 0:
+        rebuild_ik_at_tcp(ik)
+    return ik
+
+
+def rebuild_ik_at_tcp(ik):
+    """Re-create G1_29_ArmIK's CasADi problem with the error measured at the fingertip frames L_tcp / R_tcp
+    (wrist_yaw_link + 0.05 + TCP_M) and a weaker joint regularisation. solve_ik() is unchanged: it only uses
+    opti / var_q / var_q_last / param_tf_l / param_tf_r, which are replaced here."""
+    import casadi
+    import pinocchio as pin
+    from pinocchio import casadi as cpin
+    m = ik.reduced_robot.model
+    for joint in ("left_wrist_yaw_joint", "right_wrist_yaw_joint"):      # match the Dex1 URDF (see WRIST_YAW_X)
+        jid = m.getJointId(joint); M = m.jointPlacements[jid]
+        t = np.array(M.translation, dtype=float); t[0] = WRIST_YAW_X
+        m.jointPlacements[jid] = pin.SE3(np.array(M.rotation), t)
+    for name, joint in (("L_tcp", "left_wrist_yaw_joint"), ("R_tcp", "right_wrist_yaw_joint")):
+        if not m.existFrame(name):
+            m.addFrame(pin.Frame(name, m.getJointId(joint), pin.SE3(np.eye(3), np.array([0.05 + TCP_M, 0.0, 0.0])),
+                                 pin.FrameType.OP_FRAME))
+    ik.reduced_robot.data = m.createData()
+    ik.ee_frames = ("L_tcp", "R_tcp")
+    cmodel = cpin.Model(m); cdata = cmodel.createData()
+    cq = casadi.SX.sym("q", m.nq, 1); tl = casadi.SX.sym("tf_l", 4, 4); tr = casadi.SX.sym("tf_r", 4, 4)
+    cpin.framesForwardKinematics(cmodel, cdata, cq)
+    L, R = m.getFrameId("L_tcp"), m.getFrameId("R_tcp")
+    trans = casadi.Function("tcp_trans", [cq, tl, tr], [casadi.vertcat(cdata.oMf[L].translation - tl[:3, 3],
+                                                                       cdata.oMf[R].translation - tr[:3, 3])])
+    rot = casadi.Function("tcp_rot", [cq, tl, tr], [casadi.vertcat(cpin.log3(cdata.oMf[L].rotation @ tl[:3, :3].T),
+                                                                   cpin.log3(cdata.oMf[R].rotation @ tr[:3, :3].T))])
+    opti = casadi.Opti()
+    var_q = opti.variable(m.nq); var_q_last = opti.parameter(m.nq)
+    p_l = opti.parameter(4, 4); p_r = opti.parameter(4, 4)
+    opti.subject_to(opti.bounded(m.lowerPositionLimit, var_q, m.upperPositionLimit))
+    opti.minimize(50 * casadi.sumsqr(trans(var_q, p_l, p_r)) + casadi.sumsqr(rot(var_q, p_l, p_r))
+                  + IK_W_REG * casadi.sumsqr(var_q) + 0.1 * casadi.sumsqr(var_q - var_q_last))
+    # tolerances: xr_teleoperate's tol 1e-4 / acceptable 5e-4 stop at a cost of ~5e-4, i.e. ~3 mm of position error
+    # (50 * 0.003^2 = 4.5e-4); test_tcp_ik 2026-11-25: median fingertip error 3.4 mm. Tighter tolerances fix that.
+    opti.solver("ipopt", {"expand": True, "detect_simple_bounds": True, "calc_lam_p": False, "print_time": False,
+                          "ipopt.sb": "yes", "ipopt.print_level": 0, "ipopt.max_iter": 50, "ipopt.tol": 1e-8,
+                          "ipopt.acceptable_tol": 1e-7, "ipopt.acceptable_iter": 5,
+                          "ipopt.warm_start_init_point": "yes"})
+    ik.cmodel, ik.cdata = cmodel, cdata
+    ik.translational_error, ik.rotational_error = trans, rot
+    ik.opti, ik.var_q, ik.var_q_last, ik.param_tf_l, ik.param_tf_r = opti, var_q, var_q_last, p_l, p_r
+    ik.L_hand_id, ik.R_hand_id = L, R
+    print(f"[sim] IK at the fingertip (TCP = L_ee + {TCP_M * 100:.1f} cm), joint regularisation {IK_W_REG}, "
+          f"wrist_yaw x {WRIST_YAW_X * 1000:.0f} mm (Dex1 URDF)", flush=True)
 
 
 def torso_correction(ik, waist_q):
@@ -134,11 +195,13 @@ def torso_correction(ik, waist_q):
 
 
 def ee_positions(ik, q14):
-    """Current L_ee / R_ee positions (pelvis frame) from the IK model."""
+    """Current end-effector poses (pelvis frame) from the IK model: the fingertip TCP frames when TCP_M > 0
+    (L_tcp / R_tcp), else xr_teleoperate's L_ee / R_ee."""
     import pinocchio as pin
     m, d = ik.reduced_robot.model, ik.reduced_robot.data
     pin.framesForwardKinematics(m, d, np.asarray(q14, dtype=float))
-    return {s: d.oMf[m.getFrameId(f)].homogeneous.copy() for s, f in (("left", "L_ee"), ("right", "R_ee"))}
+    names = getattr(ik, "ee_frames", ("L_ee", "R_ee"))
+    return {s: d.oMf[m.getFrameId(f)].homogeneous.copy() for s, f in zip(SIDES, names)}
 
 
 def other_teleop_running():
@@ -242,6 +305,7 @@ class SimSource:
         self.pulse = {s: None for s in SIDES}
         self.pulse_seq = 0
         self.last_cmd = None
+        self.ik_fail_count = 0
         mdl = self.ik.reduced_robot.model
         self.q_lo, self.q_hi = np.array(mdl.lowerPositionLimit[:14]), np.array(mdl.upperPositionLimit[:14])
         self.String_ = String_
@@ -301,6 +365,61 @@ class SimSource:
         except Exception:
             pass
 
+    def _ik_guard(self, sol_q, seed):
+        """Hold the seed when the IK fails, and clean xr_teleoperate's IK smoothing filter.
+
+        On a CasADi failure G1_29_ArmIK.solve_ik returns the seed object itself (= hold), but it has
+        already pushed the failed solution (often ~0, possibly NaN) into its 4-sample smoothing filter.
+        The next 3 good solutions would then be pulled toward it (a twitch toward q = 0), or become NaN.
+        """
+        sol = np.asarray(sol_q, dtype=float)
+        if sol_q is not seed and np.all(np.isfinite(sol)):
+            return sol
+        self.ik_fail_count += 1
+        good = np.array(seed, dtype=float)
+        f = getattr(self.ik, "smooth_filter", None)
+        if f is not None:
+            f._data_queue = [good.copy()]
+            f._filtered_data = good.copy()
+        self.ik.init_data = good.copy()
+        print(f"[ik] no solution (#{self.ik_fail_count}): holding the last command, IK filter reset", flush=True)
+        return good
+
+    def _track_log(self, follow, targets, ee_now, q, dq, cmd):
+        """Diagnosis (2026-11-25, "the arm overshoots the ghost"): one CSV row per side per control step while it
+        follows, in logs/track_<start time>.csv. Positions in mm, pelvis frame. ghost = IK target without the bias."""
+        try:
+            if not any(follow.values()):
+                return
+            if getattr(self, "_track_f", None) is None:
+                d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+                os.makedirs(d, exist_ok=True)
+                path = os.path.join(d, time.strftime("track_%Y%m%d_%H%M%S.csv"))
+                self._track_f = open(path, "w", buffering=1)
+                self._track_f.write("t,side,gx,gy,gz,ex,ey,ez,err_mm,bx,by,bz,max_dq,max_cmd_err,rot_err_deg,tip10_err_mm\n")
+                print(f"[track] logging to {path}", flush=True)
+            t = time.time()
+            for s in SIDES:
+                if not follow[s]:
+                    continue
+                b = self.ee_bias[s]
+                g = targets[s][:3, 3] - b
+                e = ee_now[s][:3, 3]
+                err = np.linalg.norm(g - e) * 1000
+                mdq = float(np.abs(dq[SL[s]]).max())
+                mce = float(np.abs(np.asarray(cmd)[SL[s]] - np.asarray(q)[SL[s]]).max())
+                Rg, Re = targets[s][:3, :3], ee_now[s][:3, :3]          # 2026-11-25b: orientation error too
+                rot = float(np.degrees(np.arccos(np.clip((np.trace(Rg.T @ Re) - 1) / 2, -1.0, 1.0))))
+                tip = np.array([0.10, 0.0, 0.0])                          # a point 10 cm ahead along the ee x axis
+                tip_err = np.linalg.norm((g + Rg @ tip) - (e + Re @ tip)) * 1000
+                self._track_f.write(f"{t:.3f},{s[0]},{g[0]*1000:.1f},{g[1]*1000:.1f},{g[2]*1000:.1f},"
+                                    f"{e[0]*1000:.1f},{e[1]*1000:.1f},{e[2]*1000:.1f},{err:.1f},"
+                                    f"{b[0]*1000:.1f},{b[1]*1000:.1f},{b[2]*1000:.1f},{mdq:.3f},{mce:.4f},{rot:.2f},{tip_err:.1f}\n")
+        except Exception as ex:
+            if time.time() - getattr(self, "_track_err_t", 0.0) > 5.0:
+                self._track_err_t = time.time()
+                print(f"[track] log skipped: {ex}", flush=True)
+
     def _note(self, text):
         self.notice, self.notice_t = text, time.time()
 
@@ -329,6 +448,8 @@ class SimSource:
         for s in SIDES:
             d = xr.get(s) if fresh else None
             ghost = np.array(d["ee"], dtype=float).reshape(4, 4).T if d and "ee" in d else None   # column-major
+            if ghost is not None and getattr(self.ik, "ee_frames", ("L_ee",))[0] != "L_ee":
+                ghost = ghost @ T_TCP                                   # ghost L_ee -> ghost fingertip (TCP)
             pressed = bool(fresh and d and d.get("clutch"))
             prev = self.gate[s].state
             st = self.gate[s].update(pressed, None if ghost is None else ghost[:3, 3], ee_now[s][:3, 3])
@@ -355,6 +476,7 @@ class SimSource:
         if any(follow.values()):
             seed = self.last_cmd if self.last_cmd is not None else q              # commanded, not the lagging measured q
             sol_q, _ = self.ik.solve_ik(Ci @ targets["left"], Ci @ targets["right"], seed, np.zeros(14))   # IK frame
+            sol_q = self._ik_guard(sol_q, seed)
         else:
             sol_q = q
         cmd = np.zeros(14)
@@ -372,6 +494,10 @@ class SimSource:
             self.was_follow[s] = follow[s]
         m, dd = self.ik.reduced_robot.model, self.ik.reduced_robot.data
         tau = pin.rnea(m, dd, cmd, np.zeros(m.nv), np.zeros(m.nv))         # gravity feed-forward
+        if not np.all(np.isfinite(cmd)):                                   # last line of defence: never send NaN
+            print("[sim] non-finite arm command - holding the last command", flush=True)
+            cmd = np.array(self.last_cmd if self.last_cmd is not None else q, dtype=float)
+            tau = pin.rnea(m, dd, cmd, np.zeros(m.nv), np.zeros(m.nv))
         self.arm.ctrl_dual_arm(cmd, tau)
         for s in SIDES:                                                     # gripper before anything that may fail
             if self.grip_cmd[s] is not None:
@@ -416,6 +542,7 @@ class SimSource:
                     self._hap_err_t = time.time()
                     print(f"[sim] haptics skipped: {e}", flush=True)
         self.last_cmd = cmd.copy()
+        self._track_log(follow, targets, ee_now, q, dq, cmd)
         for sd in SIDES:
             key = (None if self.grip_cmd[sd] is None else round(self.grip_cmd[sd], 1), round(self.grip_state[sd], 1))
             if key != getattr(self, "_glast", {}).get(sd) and time.time() - getattr(self, "_glog_t", 0.0) > 0.1:

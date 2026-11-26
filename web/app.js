@@ -4,7 +4,7 @@
 // The operator stands where the robot's head camera is (first person); both sticks pressed moves / turns / scales the
 // whole scene, so the robot can also be looked at from outside.
 import * as THREE from 'three';
-const APP_BUILD = 'build 2026-11-22e';   // shown in the HUD: tells which page version the headset runs
+const APP_BUILD = 'build 2026-11-25d';   // shown in the HUD: tells which page version the headset runs
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import URDFLoader from 'urdf-loader';
@@ -31,7 +31,19 @@ const T_XR_ROBOT = new THREE.Matrix4().set(0, -1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0,
 const T_EE_DEX1_BASE = new THREE.Matrix4().makeTranslation(0.0415 - 0.05, 0, 0);
 const GHOST_LOCAL = new THREE.Matrix4().multiplyMatrices(T_XR_ROBOT, T_EE_DEX1_BASE); // controller -> ghost base
 const GHOST_LOCAL_INV = GHOST_LOCAL.clone().invert();
+// TCP marker (2026-11-25): the point between the two fingers where they meet when the gripper closes = the point the
+// server's IK puts on the ghost's same point (sim_source TCP_M: L_ee + 0.1348 m = Dex1 base + 0.1433 m, finger tip).
+// Ghost: magenta dot, robot: red dot, drawn on top of everything. Size: ?tcp=<diameter mm> (default 8, 0 = off).
+const TCP_IN_DEX1_BASE = new THREE.Vector3(0.1433, 0, 0);
+const TCP_DOT_MM = Number(new URLSearchParams(location.search).get('tcp') ?? 8);
+function makeTcpDot(color) {
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(Math.max(TCP_DOT_MM, 0.1) / 2000, 16, 12),
+    new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.9 }));
+  dot.position.copy(TCP_IN_DEX1_BASE); dot.renderOrder = 12; dot.visible = TCP_DOT_MM > 0;
+  return dot;
+}
 const COLOR_IDLE = new THREE.Color(0x4fc3f7), COLOR_FOLLOW = new THREE.Color(0x66ff88);
+const COLOR_TCP_IDLE = new THREE.Color(0xffd54f);
 const COLOR_ROBOT = new THREE.Color(0xcfd8e3);
 // gripper force / width sliders at the thumb-rest anchor (2026-11-10). Ranges depend on the end effector;
 // Dex1-1: force from the Unitree spec (unitree.com/Dex1-1), 5-120 N adjustable (not measured by us).
@@ -96,8 +108,10 @@ function makePanel(w, h, label) {
   return mesh;
 }
 const headPanel = makePanel(0.8, 0.6, 'Head camera: waiting');
-headPanel.position.set(0, 0.42, -1.0);
-headPanel.rotation.x = Math.atan2(0.42, 1.0);
+// 2026-11-25 (user): head camera panel at the robot's head height (eye level), straight ahead, no tilt.
+// Was (0, 0.42, -1.0) tilted atan2(0.42, 1.0) = 23 deg (too high).
+headPanel.position.set(0, 0.0, -1.0);
+headPanel.rotation.x = 0;
 workspace.add(headPanel);
 
 const hudCanvas = textCanvas(1024, 160);
@@ -109,9 +123,10 @@ hud.position.set(0, 0.80, -1.0);
 hud.rotation.x = Math.atan2(0.80, 1.0);
 workspace.add(hud);
 
+// 2026-11-26 (user): wrist panel 25% smaller (0.32x0.24 -> 0.24x0.18), same top edge as before.
 const wristPanels = {
-  left: makePanel(0.32, 0.24, 'Left wrist camera'),
-  right: makePanel(0.32, 0.24, 'Right wrist camera'),
+  left: makePanel(0.24, 0.18, 'Left wrist camera'),
+  right: makePanel(0.24, 0.18, 'Right wrist camera'),
 };
 for (const s of SIDES) { wristPanels[s].visible = false; scene.add(wristPanels[s]); }
 
@@ -234,6 +249,7 @@ urdfLoader.load(URDF_URL, r => {
     stl.load(`/robot/meshes/${s}_rubber_hand.STL`, geo => grp.add(new THREE.Mesh(geo, robotMat)));
     wrist.add(grp); robotRubber[s] = grp;
     r.links[`${s}_dex1_base_link`]?.add(makeWristCam(s, robotMat));   // hidden with the Dex1 in rubber-hand mode
+    r.links[`${s}_dex1_base_link`]?.add(makeTcpDot(COLOR_ROBOT.getHex()));  // robot TCP (gray, same as robot)
   }
   robotFrame.add(r);
   setStatus('Robot model loaded', 'ok');
@@ -285,6 +301,7 @@ const WRIST_CAM_QUAT = {                                // camera (x image right
 // FOV = the sim camera (aperture 20 x 15 mm, f 12 mm = 80 x 64 deg); D405 colour is ~87 x 58 deg (not used yet)
 const WRIST_CAM_HFOV = THREE.MathUtils.degToRad(72.5), WRIST_CAM_VFOV = THREE.MathUtils.degToRad(57.6);   // D405 640x480
 const WRIST_CAM_BOX = { w: 0.042, h: 0.042, d: 0.023, lensGap: 0.016 };
+const WRIST_RING = { rIn: 0.031, wall: 0.004, width: 0.009, x: 0.0 };   // clamp ring (m), Dex1 base frame, axis = x
 const camMats = {                                       // digital robot: real colours, see-through like the robot
   silver: new THREE.MeshStandardMaterial({ color: 0xc3c8ce, metalness: 0.6, roughness: 0.35, transparent: true, opacity: 0.6 }),
   white: new THREE.MeshStandardMaterial({ color: 0xf2f0ea, metalness: 0.0, roughness: 0.8, transparent: true, opacity: 0.6 }),
@@ -321,11 +338,19 @@ function makeWristCam(s, mat, frustumColor) {
   cradle.position.z = -B.d - 0.0025; cam.add(cradle);
   // white bracket: clamp ring around the motor body at the wrist end, an arm rising behind it, bending forward to the
   // bottom of the camera's back plate (shape approximated from the photos)
-  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.037, 0.005, 10, 40), mWhite);
-  ring.rotation.y = Math.PI / 2; ring.position.set(0.006, y0, 0); holder.add(ring);
+  // 2026-11-25: flat clamp ring coaxial with the wrist (was a torus r 37 mm centred at the camera's y offset, so it sat
+  // off the wrist axis). Inner radius = wrist link end radius (wrist_yaw_link STL, 30.5 mm) + 0.5 mm, 4 mm wall, 9 mm wide,
+  // over the wrist / Dex1 joint (Dex1 base x = 0). The camera pose is unchanged.
+  const R = WRIST_RING, shape = new THREE.Shape().absarc(0, 0, R.rIn + R.wall, 0, Math.PI * 2, false);
+  shape.holes.push(new THREE.Path().absarc(0, 0, R.rIn, 0, Math.PI * 2, true));
+  const ringGeo = new THREE.ExtrudeGeometry(shape, { depth: R.width, bevelEnabled: false, curveSegments: 48 });
+  ringGeo.translate(0, 0, -R.width / 2);
+  const ring = new THREE.Mesh(ringGeo, mWhite);
+  ring.rotation.y = Math.PI / 2; ring.position.set(R.x, 0, 0); holder.add(ring);
   cam.updateMatrix();
   const plateBottom = new THREE.Vector3(0, B.h / 2 - 0.004, -B.d - 0.0025).applyMatrix4(cam.matrix);  // +y = image down
-  const p0 = new THREE.Vector3(0.004, y0, 0.040), p1 = new THREE.Vector3(-0.002, y0, 0.056);
+  const rOut = WRIST_RING.rIn + WRIST_RING.wall;          // strut starts on the ring's outer surface, camera side
+  const p0 = new THREE.Vector3(WRIST_RING.x, y0, Math.sqrt(rOut * rOut - y0 * y0)), p1 = new THREE.Vector3(-0.002, y0, 0.056);
   const up = new THREE.Vector3(0, 1, 0);
   holder.add(boxBetween(p0, p1, 0.007, 0.03, mWhite, up), boxBetween(p1, plateBottom, 0.007, 0.03, mWhite, up));
   if (SHOW_WRIST_CAM_FRUSTUM && ghost) {
@@ -361,11 +386,13 @@ for (const s of SIDES) {
   // rubber hand: URDF hand_palm_joint is wrist_yaw + (0.0415, +-0.003, 0); Dex1 base is wrist_yaw + (0.0415, 0, 0)
   const rubber = new THREE.Group(); rubber.position.set(0, s === 'left' ? 0.003 : -0.003, 0); root.add(rubber);
   stl.load(`/robot/meshes/${s}_rubber_hand.STL`, geo => rubber.add(new THREE.Mesh(geo, mat)));
-  ghosts[s] = { root, base, f1, f2, rubber, mat, anchor, line, offset: new THREE.Matrix4(), frozen: false, sliderUsed: false };
+  const tcpDot = makeTcpDot(0xffd54f);                  // ghost TCP: yellow idle, green while the arm follows
+  ghosts[s] = { root, base, f1, f2, rubber, mat, anchor, line, tcpDot, offset: new THREE.Matrix4(), frozen: false, sliderUsed: false };
   for (const [grp, file] of [[base, 'Dex1_base_link'], [f1, 'Dex1_finger_link_1'], [f2, 'Dex1_finger_link_2']]) {
     stl.load(`/robot/meshes/${file}.STL`, geo => grp.add(new THREE.Mesh(geo, mat)));
   }
   base.add(makeWristCam(s, mat, 0xffd54f));             // shown / hidden together with the Dex1 base
+  base.add(tcpDot);
 }
 // ---------- force / width slider panel (shown above the yellow dot while the thumb rest is touched)
 // slider panel geometry (m, panel-local); the canvas has the plane's aspect, bars are drawn from these same numbers
@@ -736,13 +763,15 @@ function updateControllers(frame) {
     setGhostFingers(s, openMm * (1 - trigger));
     updateSliders(s, rest, squeeze, tmpV.setFromMatrixPosition(c.matrixWorld).clone());
     g.mat.color.copy(clutch ? COLOR_FOLLOW : COLOR_IDLE);
+    g.tcpDot.material.color.copy(clutch ? COLOR_FOLLOW : COLOR_TCP_IDLE);
 
     // wrist camera: while the grip button is held (thumb rest not touched), centered right above the ghost
     const wp = wristPanels[s];
     wp.visible = squeeze && !rest && !sliders[s].grab;
     if (wp.visible) {
       tmpV.setFromMatrixPosition(g.root.matrix);
-      wp.position.copy(tmpV).add(new THREE.Vector3(0, 0.08 + 0.12, 0));   // panel bottom ~8 cm above the ghost
+      // bottom offset 0.08 + old height 0.24 - new height 0.18 = 0.14, + new half-height 0.09: same top edge as before
+      wp.position.copy(tmpV).add(new THREE.Vector3(0, 0.14 + 0.09, 0));
     }
 
     // wrist target for the IK (step 2): ghost pose in the robot pelvis frame, Unitree EE convention

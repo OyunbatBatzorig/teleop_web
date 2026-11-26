@@ -18,6 +18,8 @@ RealSource = SimSource (sim_source.py) with the real robot's settings. Same page
   * --dry-run: everything runs (robot state, IK, gates, haptics, logs) but no DDS writer is created, nothing is sent.
 """
 import sys
+import threading
+import time
 
 import numpy as np
 
@@ -28,6 +30,70 @@ REAL_ARM_CLIP = np.deg2rad(90.0)          # G1_29_ArmController.set_arm_velocity
 REAL_GRIP_STEP = 0.18                     # rad per control step, as xr_teleoperate
 CONFIRM_TEXT = "REAL ROBOT"
 ARM_MODES = {"arm_sdk": True, "lowcmd": False}   # -> G1_29_ArmController(motion_mode=...)
+
+
+class _Jpg:
+    __slots__ = ("jpg",)
+    def __init__(self, jpg):
+        self.jpg = jpg
+
+
+class SimpleImageClient:
+    """Client for ~/image_server/image_server.py on PC2 (2026-11-22 version, confirmed running as-is: no
+    CamConfigResponder, single zmq PUB on `port`, one JPEG per message = head|left_wrist|right_wrist images
+    hconcat'd at `cam_w` px each, `cam_h` px tall - NOT the 3-port + cam-config-request protocol that
+    teleimager.image_client.ImageClient expects. PC2's official teleimager-server (g1_nocode_xr) does speak
+    that protocol, but it is not ours to manage (it stopped on its own 2026-11-26, cause unknown - possibly
+    tied to g1studio/FSM state) - this script's own camera service is the one we can keep running ourselves.
+    Same get_head_frame/get_left_wrist_frame/get_right_wrist_frame interface as ImageClient (an object with
+    .jpg, or None)."""
+    def __init__(self, host, port=5555, cam_w=640, cam_h=480):
+        import zmq
+        self._cam_w, self._cam_h = cam_w, cam_h
+        self._lock = threading.Lock()
+        self._frames = {"head": None, "left": None, "right": None}
+        self._sock = zmq.Context.instance().socket(zmq.SUB)
+        self._sock.setsockopt(zmq.SUBSCRIBE, b"")
+        self._sock.setsockopt(zmq.CONFLATE, 1)
+        self._sock.setsockopt(zmq.RCVTIMEO, 200)
+        self._sock.connect(f"tcp://{host}:{port}")
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        import zmq
+        import cv2
+        import numpy as np
+        w = self._cam_w
+        while True:
+            try:
+                data = self._sock.recv()
+            except zmq.Again:
+                continue
+            except Exception:
+                time.sleep(0.2)
+                continue
+            img = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if img is None or img.shape[1] < 3 * w:
+                continue
+            out = {}
+            for name, crop in (("head", img[:, 0:w]), ("left", img[:, w:2 * w]), ("right", img[:, 2 * w:3 * w])):
+                ok, buf = cv2.imencode(".jpg", crop)
+                if ok:
+                    out[name] = _Jpg(buf.tobytes())
+            with self._lock:
+                self._frames.update(out)
+
+    def get_head_frame(self):
+        with self._lock:
+            return self._frames["head"]
+
+    def get_left_wrist_frame(self):
+        with self._lock:
+            return self._frames["left"]
+
+    def get_right_wrist_frame(self):
+        with self._lock:
+            return self._frames["right"]
 
 
 def real_live_cfg(arm_mode, img_host, dry_run):
@@ -66,6 +132,7 @@ class RealSource(SimSource):
                  haptic_cfg=None):
         super().__init__(network_interface, haptics=haptics, haptic_cfg=haptic_cfg,
                          live=real_live_cfg(arm_mode, img_host, dry_run), _real_ok=True)
+        self.img = SimpleImageClient(img_host)      # our own PC2 server (single-port protocol), see SimpleImageClient
         print(f"[real] ready{' (DRY RUN)' if dry_run else ''}: hold A / X to let that arm follow its ghost", flush=True)
         import atexit
         atexit.register(self.shutdown)
